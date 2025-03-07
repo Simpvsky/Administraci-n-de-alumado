@@ -1,78 +1,96 @@
 import express, { Request, Response, NextFunction } from "express";
 import jwt, { JwtPayload } from "jsonwebtoken";
 import dotenv from "dotenv";
+import cors from "cors";
+import cookieParser from "cookie-parser";
+import bcrypt from "bcrypt";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const JWT_SECRET = process.env.JWT_SECRET || "default_secret";
 
-// Middleware para parsear JSON
+app.use(cors({
+  origin: ["http://localhost:3000", "http://localhost:5173"],
+  methods: "GET,POST,PUT,DELETE",
+  credentials: true
+}));
+
 app.use(express.json());
+app.use(cookieParser());
 
-// Credenciales simuladas (almacenadas en el código para pruebas)
-const USERS = [
-  { username: "admin", password: "12345" }, // Usuario de prueba
-];
+// Usuarios con contraseña encriptada
+const USERS = [{ 
+  username: "admin", 
+  password: bcrypt.hashSync("12345", 10)
+}];
 
-// Definir una interfaz para extender el objeto Request
+// Interfaz para manejar req.user
 interface AuthenticatedRequest extends Request {
-  user?: string | JwtPayload; // Aquí indicamos que `user` es opcional
+  user?: string | JwtPayload;
 }
 
 // Generar token JWT
 const generateToken = (username: string): string => {
-  return jwt.sign({ username }, process.env.JWT_SECRET!, { expiresIn: "1h" });
+  return jwt.sign({ username }, JWT_SECRET, { expiresIn: "1h" });
 };
 
-// Middleware para verificar el token
-const verifyToken = (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    res.status(401).json({ error: "Token no proporcionado" });
-    return;
+// Middleware para verificar token
+const verifyToken = (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): void => {
+  const token = req.cookies?.token;
+  if (!token) {
+    return res.status(401).json({ error: "Acceso denegado. Inicia sesión primero." });
   }
 
-  const token = authHeader.split(" ")[1];
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as string | JwtPayload;
-    req.user = decoded; // Asignamos el token decodificado al objeto `req.user`
+    req.user = jwt.verify(token, JWT_SECRET);
     next();
   } catch (err) {
-    res.status(401).json({ error: "Token inválido o expirado" });
+    return res.status(401).json({ error: "Sesión inválida o expirada." });
   }
 };
 
-// Ruta de login (sin base de datos)
+// Login
 app.post("/api/login", (req, res) => {
   const { username, password } = req.body;
 
-  console.log("Datos recibidos del frontend:", username, password); // Debug
+  if (!username || !password) {
+    return res.status(400).json({ error: "Usuario y contraseña son obligatorios." });
+  }
 
-  const USERS = [
-    { username: "admin", password: "12345" },
-  ];
-
-  const user = USERS.find((u) => u.username === username && u.password === password);
-
-  console.log("Usuario encontrado:", user); // Debug
-
-  if (!user) {
+  const user = USERS.find((u) => u.username === username);
+  if (!user || !bcrypt.compareSync(password, user.password)) {
     return res.status(401).json({ error: "Credenciales inválidas" });
   }
 
-  const token = jwt.sign({ username }, process.env.JWT_SECRET!, { expiresIn: "1h" });
+  const token = generateToken(username);
 
-  res.status(200).json({ token });
+  res.cookie("token", token, {
+    httpOnly: true,
+    secure: false,
+    sameSite: "strict",
+  });
+
+  return res.status(200).json({ message: "Login exitoso", token });
 });
 
-// Ruta protegida (requiere autenticación)
-app.get("/api/protected", verifyToken, (req: AuthenticatedRequest, res: Response): void => {
-  const username = (req.user as JwtPayload)?.username; // Extraer el nombre de usuario del token decodificado
-  res.status(200).json({ message: `Hola, ${username}! Accediste a una ruta protegida.` });
+// Logout
+app.post("/api/logout", (req, res) => {
+  res.clearCookie("token").status(200).json({ message: "Logout exitoso" });
 });
 
-// Iniciar el servidor
+// Ruta protegida
+app.get("/api/protected", verifyToken, (req: AuthenticatedRequest, res: Response) => {
+  const username = (req.user as JwtPayload)?.username || "Usuario desconocido";
+  return res.status(200).json({ message: `Hola, ${username}! Accediste a una ruta protegida.` });
+});
+
+// Iniciar servidor
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en http://localhost:${PORT}`);
+  console.log(`✅ Servidor corriendo en http://localhost:${PORT}`);
 });
